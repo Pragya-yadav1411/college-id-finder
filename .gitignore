@@ -1,0 +1,21 @@
+# Python environment
+.venv/
+venv/
+
+# Python temporary files
+__pycache__/
+*.pyc
+*.pyo
+
+# Uploaded and generated Excel files
+data/
+*.xlsx
+*.xls
+*.csv
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Operating-system files
+.DS_Store
+Thumbs.db
