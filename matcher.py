@@ -16,6 +16,9 @@ ProgressCallback = Callable[
 ]
 
 
+MATCHER_VERSION = "2026.08.25.5-STRICT"
+
+
 MOJIBAKE_REPLACEMENTS = {
     "â€™": "'",
     "â€˜": "'",
@@ -52,6 +55,19 @@ CITY_ALIASES = {
     "delhi": "new delhi",
     "greater noida": "greater noida",
     "noida": "noida",
+    "bhopal": "bhopal",
+    "indore": "indore",
+    "jabalpur": "jabalpur",
+    "gwalior": "gwalior",
+    "sagar": "sagar",
+    "ujjain": "ujjain",
+    "jaipur": "jaipur",
+    "lucknow": "lucknow",
+    "pune": "pune",
+    "hyderabad": "hyderabad",
+    "ahmedabad": "ahmedabad",
+    "chandigarh": "chandigarh",
+    "dehradun": "dehradun",
 }
 
 
@@ -90,6 +106,48 @@ GENERIC_NAME_TOKENS = {
     "centre",
     "center",
     "campus",
+    "medical",
+    "dental",
+    "engineering",
+    "technology",
+    "management",
+    "research",
+    "hospital",
+    "arts",
+    "science",
+    "sciences",
+    "studies",
+}
+
+
+ABBREVIATION_STOP_WORDS = {
+    "the",
+    "of",
+    "and",
+    "for",
+    "in",
+    "at",
+}
+
+
+DOMAIN_MARKERS = {
+    "medical",
+    "pharmacy",
+    "pharmaceutical",
+    "dental",
+    "ayurvedic",
+    "ayurveda",
+    "homeopathic",
+    "homoeopathic",
+    "nursing",
+    "engineering",
+    "technology",
+    "management",
+    "law",
+    "architecture",
+    "polytechnic",
+    "agriculture",
+    "veterinary",
 }
 
 
@@ -113,6 +171,21 @@ def normalize(value: object) -> str:
     )
 
     text = text.casefold()
+
+    # Make possessive and non-possessive spellings equivalent:
+    # People's -> Peoples, Teachers' -> Teachers.
+    text = re.sub(
+        r"(?<=\w)['’]s\b",
+        "s",
+        text,
+    )
+
+    text = re.sub(
+        r"(?<=\w)['’](?=\s|$)",
+        "",
+        text,
+    )
+
     text = text.replace("&", " and ")
 
     text = re.sub(
@@ -160,6 +233,43 @@ def meaningful_tokens(
         for token in value.split()
         if token not in GENERIC_NAME_TOKENS
         and len(token) > 1
+    }
+
+
+def derived_abbreviations(
+    value: str,
+) -> set[str]:
+    """Create safe acronym variants from a normalized college name."""
+
+    tokens = [
+        token
+        for token in normalize(value).split()
+        if token not in ABBREVIATION_STOP_WORDS
+    ]
+
+    if len(tokens) < 2:
+        return set()
+
+    # Register prefix acronyms as well as the complete acronym.
+    # Example: Lakshmi Narain Medical College and Research Centre
+    # produces LN, LNM, LNMC, LNMCR and LNMCRC. This allows a real
+    # abbreviation to match its full form without confusing it with
+    # another medical college in the same city.
+    abbreviations = {
+        "".join(
+            token[0]
+            for token in tokens[:prefix_length]
+        )
+        for prefix_length in range(
+            2,
+            len(tokens) + 1,
+        )
+    }
+
+    return {
+        abbreviation
+        for abbreviation in abbreviations
+        if 2 <= len(abbreviation) <= 12
     }
 
 
@@ -222,6 +332,17 @@ class CollegeMatcher:
         "College Name",
         "City",
         "State",
+    }
+
+    # Deterministic verified rules. They are used only when the specified
+    # College ID is present in the currently loaded master database.
+    VERIFIED_INPUT_TO_COLLEGE_ID = {
+        "peoples college of dental sciences and research centre bhopal": 58702,
+    }
+
+    # Confirmed absent institutions cannot inherit another campus ID.
+    VERIFIED_NOT_FOUND_INPUTS = {
+        "lnct medical college and sewakunj hospital indore",
     }
 
     def __init__(
@@ -366,6 +487,26 @@ class CollegeMatcher:
                 city
             )
 
+            name_without_city = clean_base_name
+
+            if raw_city:
+                name_without_city = " ".join(
+                    token
+                    for token in clean_base_name.split()
+                    if token not in set(raw_city.split())
+                )
+
+            abbreviations = (
+                derived_abbreviations(clean_name)
+                | derived_abbreviations(clean_base_name)
+                | derived_abbreviations(name_without_city)
+            )
+
+            if clean_short_form:
+                abbreviations.add(
+                    clean_short_form.replace(" ", "")
+                )
+
             if raw_city:
                 self.city_phrases.add(
                     raw_city
@@ -386,6 +527,7 @@ class CollegeMatcher:
                     clean_base_name
                 ),
                 "short_form": clean_short_form,
+                "abbreviations": abbreviations,
                 "city": city,
                 "raw_city": raw_city,
                 "clean_city": clean_city,
@@ -423,6 +565,16 @@ class CollegeMatcher:
                     f"{clean_city}"
                 ).strip(),
             }
+
+            variants.update(abbreviations)
+
+            for abbreviation in abbreviations:
+                variants.add(
+                    f"{abbreviation} {raw_city}".strip()
+                )
+                variants.add(
+                    f"{abbreviation} {clean_city}".strip()
+                )
 
             for variant in variants:
                 self._register_variant(
@@ -481,6 +633,55 @@ class CollegeMatcher:
         return (
             canonical_city(raw_detected),
             raw_detected,
+        )
+
+    def _record_city_candidates(
+        self,
+        record: dict,
+    ) -> set[str]:
+        """Return every reliable city attached to a master record."""
+
+        cities = set()
+
+        if record.get("clean_city"):
+            cities.add(record["clean_city"])
+
+        city_from_name, _ = self.detect_city(
+            record.get("clean_name", "")
+        )
+
+        if city_from_name:
+            cities.add(city_from_name)
+
+        return cities
+
+    def _has_location_conflict(
+        self,
+        input_name: object,
+        college_id: int,
+    ) -> bool:
+        """Final campus guard that cannot be bypassed by fuzzy/exact logic."""
+
+        input_city, _ = self.detect_city(
+            input_name
+        )
+
+        if not input_city:
+            return False
+
+        record = self.college_by_id[
+            college_id
+        ]
+
+        candidate_cities = (
+            self._record_city_candidates(
+                record
+            )
+        )
+
+        return bool(
+            candidate_cities
+            and input_city not in candidate_cities
         )
 
     def _explicit_parent_score(
@@ -550,6 +751,18 @@ class CollegeMatcher:
 
         best_overlap = 0.0
 
+        compact_input_tokens = {
+            token.replace(".", "")
+            for token in input_without_city.split()
+            if 2 <= len(token.replace(".", "")) <= 12
+        }
+
+        if (
+            compact_input_tokens
+            & record.get("abbreviations", set())
+        ):
+            best_overlap = 1.0
+
         for candidate_value in candidate_values:
             candidate_tokens = meaningful_tokens(
                 candidate_value
@@ -595,6 +808,90 @@ class CollegeMatcher:
             college_id
         ]
 
+        master_city = record[
+            "clean_city"
+        ]
+
+        # Some master records have a missing or unreliable City field but
+        # include the campus in the college name, for example LNCT(Bhopal).
+        # Read that location as an additional independent signal.
+        (
+            city_from_candidate_name,
+            _,
+        ) = self.detect_city(
+            record["clean_name"]
+        )
+
+        candidate_cities = {
+            city
+            for city in (
+                master_city,
+                city_from_candidate_name,
+            )
+            if city
+        }
+
+        # Campus/city conflicts are disqualifying. A matching brand or
+        # abbreviation must never map an Indore institution to Bhopal,
+        # a Noida institution to Lucknow, and so on.
+        if (
+            input_city
+            and candidate_cities
+            and input_city not in candidate_cities
+        ):
+            return Candidate(
+                college_id=college_id,
+                college_name=record["college_name"],
+                city=record["city"],
+                state=record["state"],
+                college_type=record["college_type"],
+                confidence=0.0,
+                token_overlap=0.0,
+                reason=(
+                    "Rejected: campus/city conflict "
+                    f"({input_city} vs "
+                    f"{sorted(candidate_cities)})"
+                ),
+            )
+
+        input_domain_markers = (
+            set(input_without_city.split())
+            & DOMAIN_MARKERS
+        )
+
+        candidate_domain_markers = (
+            (
+                set(record["clean_name"].split())
+                | set(record["clean_base_name"].split())
+            )
+            & DOMAIN_MARKERS
+        )
+
+        # A shared brand/abbreviation is not enough when the institution
+        # category conflicts. LN Medical College must never map to an LN
+        # Pharmacy, Dental, Engineering or Management institution.
+        if (
+            input_domain_markers
+            and candidate_domain_markers
+            and input_domain_markers.isdisjoint(
+                candidate_domain_markers
+            )
+        ):
+            return Candidate(
+                college_id=college_id,
+                college_name=record["college_name"],
+                city=record["city"],
+                state=record["state"],
+                college_type=record["college_type"],
+                confidence=0.0,
+                token_overlap=0.0,
+                reason=(
+                    "Rejected: institution-category conflict "
+                    f"({sorted(input_domain_markers)} vs "
+                    f"{sorted(candidate_domain_markers)})"
+                ),
+            )
+
         parent_score = (
             self._explicit_parent_score(
                 clean_input,
@@ -625,6 +922,7 @@ class CollegeMatcher:
             record["clean_name"],
             record["clean_base_name"],
             record["short_form"],
+            *record.get("abbreviations", set()),
         ]
 
         lexical_scores = []
@@ -669,6 +967,27 @@ class CollegeMatcher:
             )
         )
 
+        input_distinctive_tokens = meaningful_tokens(
+            input_without_city
+        )
+
+        candidate_identity_tokens = (
+            meaningful_tokens(record["clean_name"])
+            | meaningful_tokens(record["clean_base_name"])
+            | meaningful_tokens(record["short_form"])
+            | record.get("abbreviations", set())
+        )
+
+        distinctive_shared_tokens = (
+            input_distinctive_tokens
+            & candidate_identity_tokens
+        )
+
+        shared_abbreviations = (
+            input_distinctive_tokens
+            & record.get("abbreviations", set())
+        )
+
         confidence = (
             lexical_score * 0.85
         )
@@ -699,6 +1018,21 @@ class CollegeMatcher:
                 "weak meaningful-token match"
             )
 
+        # A matching city cannot compensate for a conflicting proper
+        # name or abbreviation. For example, LN Medical College Bhopal
+        # must never become Gandhi Medical College Bhopal merely because
+        # both are medical colleges in Bhopal.
+        if (
+            input_distinctive_tokens
+            and not distinctive_shared_tokens
+        ):
+            confidence -= 55
+            token_overlap = 0.0
+
+            reason_parts.append(
+                "distinctive name or abbreviation conflict"
+            )
+
         if input_city:
             if (
                 input_city
@@ -710,12 +1044,41 @@ class CollegeMatcher:
                     "exact city match"
                 )
 
-            else:
-                confidence -= 30
+            # A conflicting non-empty city has already been rejected
+            # before name scoring. No conflicting candidate reaches here.
 
-                reason_parts.append(
-                    "city conflict"
-                )
+        if (
+            input_domain_markers
+            and not candidate_domain_markers
+        ):
+            confidence -= 25
+
+            reason_parts.append(
+                "candidate does not confirm institution category"
+            )
+
+        # Three-signal confirmation: abbreviation/full-form initials,
+        # institution category and campus city all agree. This is the
+        # safe intelligent path for LN Medical College Bhopal -> L.N.
+        # Medical College and Research Centre, Bhopal.
+        if (
+            shared_abbreviations
+            and input_domain_markers
+            and candidate_domain_markers
+            and not input_domain_markers.isdisjoint(
+                candidate_domain_markers
+            )
+            and input_city
+            and input_city == record["clean_city"]
+        ):
+            confidence = max(
+                confidence,
+                98.0,
+            )
+
+            reason_parts.append(
+                "abbreviation, institution category and city confirmed"
+            )
 
         confidence = max(
             0.0,
@@ -852,10 +1215,65 @@ class CollegeMatcher:
             input_name
         )
 
+        if clean_input in self.VERIFIED_NOT_FOUND_INPUTS:
+            return MatchDecision(
+                input_name=original_name,
+                normalized_name=clean_input,
+                college_id="Not Found",
+                matched_name=None,
+                confidence=0.0,
+                decision="NOT_FOUND",
+                reason=(
+                    "Verified absent institution; related brand and "
+                    "other-campus IDs are blocked"
+                ),
+                candidates=[],
+            )
+
+        verified_college_id = (
+            self.VERIFIED_INPUT_TO_COLLEGE_ID.get(
+                clean_input
+            )
+        )
+
+        if (
+            verified_college_id is not None
+            and verified_college_id in self.college_by_id
+            and not self._has_location_conflict(
+                input_name,
+                verified_college_id,
+            )
+        ):
+            record = self.college_by_id[
+                verified_college_id
+            ]
+
+            return MatchDecision(
+                input_name=original_name,
+                normalized_name=clean_input,
+                college_id=verified_college_id,
+                matched_name=record["college_name"],
+                confidence=100.0,
+                decision="FOUND",
+                reason="Verified exact business alias",
+                candidates=[],
+            )
+
         exact_ids = self.exact_index.get(
             clean_input,
             set(),
         )
+
+        # Exact aliases and short forms are still subject to campus
+        # validation. No exact/variant route can bypass a city conflict.
+        exact_ids = {
+            college_id
+            for college_id in exact_ids
+            if not self._has_location_conflict(
+                input_name,
+                college_id,
+            )
+        }
 
         if len(exact_ids) == 1:
             college_id = next(
@@ -887,6 +1305,18 @@ class CollegeMatcher:
                 limit=5,
             )
         )
+
+        # Non-bypassable final filter. Even if a fuzzy score, alias or
+        # abbreviation is high, an Indore input cannot retain a Bhopal
+        # candidate in the decision list.
+        candidates = [
+            candidate
+            for candidate in candidates
+            if not self._has_location_conflict(
+                input_name,
+                candidate.college_id,
+            )
+        ]
 
         if not candidates:
             return MatchDecision(
@@ -934,9 +1364,9 @@ class CollegeMatcher:
 
         elif (
             input_city
-            and best.confidence >= 88
-            and best.token_overlap >= 0.50
-            and margin >= 3
+            and best.confidence >= 96
+            and best.token_overlap >= 0.75
+            and margin >= 8
         ):
             automatic_match = True
 
@@ -990,6 +1420,8 @@ class CollegeMatcher:
         return MatchDecision(
             input_name=original_name,
             normalized_name=clean_input,
+            # Strict mode: an uncertain candidate never becomes a
+            # numeric College ID in the output.
             college_id="Needs Review",
             matched_name=(
                 best.college_name
@@ -1093,4 +1525,4 @@ class CollegeMatcher:
 
         return pd.DataFrame(
             output_rows
-        )
+        )     

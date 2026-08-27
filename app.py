@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
@@ -7,7 +9,10 @@ from excel_io import (
     read_first_sheet,
     write_match_results,
 )
-from matcher import CollegeMatcher
+from matcher import (
+    CollegeMatcher,
+    MATCHER_VERSION,
+)
 
 
 st.set_page_config(
@@ -18,22 +23,64 @@ st.set_page_config(
 
 st.title("College ID Finder")
 
+st.caption(
+    f"Matcher version: {MATCHER_VERSION}"
+)
+
 st.write(
     """
-    Upload the Collegedunia master database and target
-    workbook. The system will automatically find College
-    IDs, identify unavailable colleges and assign a
-    confidence score.
+    Upload the target college workbook. The Collegedunia
+    master database is loaded automatically. The system will
+    find College IDs, identify unavailable colleges and assign
+    a confidence score.
     """
 )
 
 st.caption(
     """
-    Location and campus names are used to separate
-    institutions such as Amity University Noida,
-    Lucknow, Jaipur, Mumbai and other campuses.
+    Location and campus names are used to separate institutions
+    such as Amity University Noida, Lucknow, Jaipur, Mumbai and
+    other campuses.
     """
 )
+
+
+MASTER_FILE_PATH = (
+    Path(__file__).resolve().parent
+    / "data"
+    / "centralised_college_master.xlsx"
+)
+
+
+@st.cache_data(show_spinner=False)
+def load_master_database(
+    file_path: str,
+    modified_time: float,
+) -> pd.DataFrame:
+    """
+    Load and cache the private master database.
+
+    modified_time is included in the cache key so replacing the
+    workbook automatically refreshes the cached master data.
+    """
+    del modified_time
+
+    dataframe = pd.read_excel(
+        file_path,
+        sheet_name=0,
+        engine="openpyxl",
+    )
+
+    dataframe = dataframe.dropna(
+        how="all"
+    ).reset_index(drop=True)
+
+    if dataframe.empty:
+        raise ValueError(
+            "The built-in master database contains no records."
+        )
+
+    return dataframe
 
 
 def safe_percentage(
@@ -49,15 +96,66 @@ def safe_percentage(
     )
 
 
+def normalized_column_name(
+    column_name: object,
+) -> str:
+    return "".join(
+        character.lower()
+        for character in str(column_name)
+        if character.isalnum()
+    )
+
+
+def find_default_column_index(
+    columns: list[object],
+    preferred_names: list[str],
+) -> int:
+    normalized_columns = [
+        normalized_column_name(column)
+        for column in columns
+    ]
+
+    for preferred_name in preferred_names:
+        normalized_preferred = normalized_column_name(
+            preferred_name
+        )
+
+        if normalized_preferred in normalized_columns:
+            return normalized_columns.index(
+                normalized_preferred
+            )
+
+    return 0
+
+
 # ---------------------------------------------------------
 # Upload screen
 # ---------------------------------------------------------
 
 if "matching_results" not in st.session_state:
-    master_file = st.file_uploader(
-        "Upload the Collegedunia master database",
-        type=["xlsx"],
-        key="master_upload",
+    if not MASTER_FILE_PATH.is_file():
+        st.error(
+            "The built-in master database is missing. Expected "
+            "file: data/centralised_college_master.xlsx"
+        )
+        st.stop()
+
+    try:
+        master_dataframe = load_master_database(
+            str(MASTER_FILE_PATH),
+            MASTER_FILE_PATH.stat().st_mtime,
+        )
+    except Exception as error:
+        st.error(
+            "Unable to load the built-in master database: "
+            f"{error}"
+        )
+        st.stop()
+
+    master_count = len(master_dataframe)
+
+    st.success(
+        f"Master database ready: {master_count:,} colleges loaded."
     )
 
     target_file = st.file_uploader(
@@ -66,41 +164,21 @@ if "matching_results" not in st.session_state:
         key="target_upload",
     )
 
-    if (
-        master_file is not None
-        and target_file is not None
-    ):
+    if target_file is not None:
         try:
-            master_dataframe, _ = (
-                read_first_sheet(
-                    master_file
-                )
-            )
-
             target_dataframe, target_sheet_name = (
-                read_first_sheet(
-                    target_file
-                )
+                read_first_sheet(target_file)
             )
-
         except Exception as error:
             st.error(
-                "Unable to read the Excel files: "
+                "Unable to read the target Excel file: "
                 f"{error}"
             )
             st.stop()
 
-        master_count = len(
-            master_dataframe
-        )
+        target_count = len(target_dataframe)
 
-        target_count = len(
-            target_dataframe
-        )
-
-        load_column_1, load_column_2 = (
-            st.columns(2)
-        )
+        load_column_1, load_column_2 = st.columns(2)
 
         load_column_1.metric(
             "Master records",
@@ -112,62 +190,67 @@ if "matching_results" not in st.session_state:
             f"{target_count:,}",
         )
 
-        default_name_column = (
-            "Name of Institute/ University"
+        target_columns = list(target_dataframe.columns)
+
+        if not target_columns:
+            st.error(
+                "The target workbook does not contain any columns."
+            )
+            st.stop()
+
+        default_name_index = find_default_column_index(
+            target_columns,
+            [
+                "College Name",
+                "Name of Institute/ University",
+                "Name of Institute/University",
+                "Institute Name",
+                "University Name",
+            ],
         )
 
-        if (
-            default_name_column
-            in target_dataframe.columns
-        ):
-            default_name_index = list(
-                target_dataframe.columns
-            ).index(default_name_column)
-        else:
-            default_name_index = 0
-
-        default_id_column = "College ID"
-
-        if (
-            default_id_column
-            in target_dataframe.columns
-        ):
-            default_id_index = list(
-                target_dataframe.columns
-            ).index(default_id_column)
-        else:
-            default_id_index = 0
+        default_id_index = find_default_column_index(
+            target_columns,
+            [
+                "College_Id",
+                "College ID",
+                "College Id",
+            ],
+        )
 
         college_name_column = st.selectbox(
             "College-name column",
-            options=list(
-                target_dataframe.columns
-            ),
+            options=target_columns,
             index=default_name_index,
         )
 
         college_id_column = st.selectbox(
             "College-ID output column",
-            options=list(
-                target_dataframe.columns
-            ),
+            options=target_columns,
             index=default_id_index,
         )
 
-        if st.button(
+        if college_name_column == college_id_column:
+            st.warning(
+                "The college-name column and College-ID output "
+                "column must be different."
+            )
+
+        start_matching = st.button(
             "Start Automatic Matching",
             type="primary",
             use_container_width=True,
-        ):
+            disabled=(
+                college_name_column
+                == college_id_column
+            ),
+        )
+
+        if start_matching:
             try:
-                st.subheader(
-                    "Processing colleges"
-                )
+                st.subheader("Processing colleges")
 
-                progress_bar = st.progress(
-                    0.0
-                )
-
+                progress_bar = st.progress(0.0)
                 progress_text = st.empty()
                 progress_detail = st.empty()
 
@@ -176,15 +259,13 @@ if "matching_results" not in st.session_state:
                     total: int,
                     message: str,
                 ) -> None:
-                    stage_progress = (
-                        safe_percentage(
-                            completed,
-                            total,
-                        )
+                    del message
+
+                    stage_progress = safe_percentage(
+                        completed,
+                        total,
                     )
 
-                    # Master indexing represents
-                    # the first 30% of processing.
                     overall_progress = (
                         stage_progress * 0.30
                     )
@@ -194,13 +275,11 @@ if "matching_results" not in st.session_state:
                     )
 
                     progress_text.info(
-                        "Stage 1 of 2: "
-                        "Building master index"
+                        "Stage 1 of 2: Building master index"
                     )
 
                     progress_detail.write(
-                        f"{completed:,} / "
-                        f"{total:,} master records "
+                        f"{completed:,} / {total:,} master records "
                         f"({stage_progress * 100:.1f}%)"
                     )
 
@@ -216,15 +295,13 @@ if "matching_results" not in st.session_state:
                     total: int,
                     message: str,
                 ) -> None:
-                    stage_progress = (
-                        safe_percentage(
-                            completed,
-                            total,
-                        )
+                    del message
+
+                    stage_progress = safe_percentage(
+                        completed,
+                        total,
                     )
 
-                    # Automatic matching represents
-                    # the remaining 70%.
                     overall_progress = (
                         0.30
                         + stage_progress * 0.70
@@ -235,30 +312,24 @@ if "matching_results" not in st.session_state:
                     )
 
                     progress_text.info(
-                        "Stage 2 of 2: "
-                        "Matching colleges"
+                        "Stage 2 of 2: Matching colleges"
                     )
 
                     progress_detail.write(
-                        f"{completed:,} / "
-                        f"{total:,} unique colleges "
+                        f"{completed:,} / {total:,} unique colleges "
                         f"({stage_progress * 100:.1f}%)"
                     )
 
-                matching_results = (
-                    matcher.match_all(
-                        target_dataframe[
-                            college_name_column
-                        ],
-                        progress_callback=(
-                            update_matching_progress
-                        ),
-                    )
+                matching_results = matcher.match_all(
+                    target_dataframe[
+                        college_name_column
+                    ],
+                    progress_callback=(
+                        update_matching_progress
+                    ),
                 )
 
-                progress_bar.progress(
-                    1.0
-                )
+                progress_bar.progress(1.0)
 
                 progress_text.success(
                     "Automatic matching completed."
@@ -310,15 +381,11 @@ if "matching_results" not in st.session_state:
 # ---------------------------------------------------------
 
 if "matching_results" in st.session_state:
-    results_dataframe = (
-        st.session_state[
-            "matching_results"
-        ]
-    )
+    results_dataframe = st.session_state[
+        "matching_results"
+    ]
 
-    total_unique = len(
-        results_dataframe
-    )
+    total_unique = len(results_dataframe)
 
     found_count = int(
         (
@@ -341,9 +408,7 @@ if "matching_results" in st.session_state:
         ).sum()
     )
 
-    st.success(
-        "Automatic matching completed."
-    )
+    st.success("Automatic matching completed.")
 
     metric_1, metric_2, metric_3, metric_4 = (
         st.columns(4)
@@ -369,52 +434,41 @@ if "matching_results" in st.session_state:
         review_count,
     )
 
-    # -----------------------------------------------------
-    # Build downloadable workbook
-    # -----------------------------------------------------
-
     result_mapping = {
         row["normalized_name"]: {
-            "college_id": row[
-                "college_id"
-            ],
-            "confidence": row[
-                "confidence"
-            ],
+            "college_id": row["college_id"],
+            "confidence": row["confidence"],
+            "decision": row["decision"],
         }
-        for _, row in (
-            results_dataframe.iterrows()
-        )
+        for _, row in results_dataframe.iterrows()
     }
 
     try:
-        completed_workbook = (
-            write_match_results(
-                original_file_bytes=(
-                    st.session_state[
-                        "target_file_bytes"
-                    ]
-                ),
-                sheet_name=(
-                    st.session_state[
-                        "target_sheet_name"
-                    ]
-                ),
-                input_name_column=(
-                    st.session_state[
-                        "college_name_column"
-                    ]
-                ),
-                output_id_column=(
-                    st.session_state[
-                        "college_id_column"
-                    ]
-                ),
-                results=result_mapping,
-                confidence_column_name=(
-                    "Confidence Score"
-                ),
-            )
+        completed_workbook = write_match_results(
+            original_file_bytes=(
+                st.session_state[
+                    "target_file_bytes"
+                ]
+            ),
+            sheet_name=(
+                st.session_state[
+                    "target_sheet_name"
+                ]
+            ),
+            input_name_column=(
+                st.session_state[
+                    "college_name_column"
+                ]
+            ),
+            output_id_column=(
+                st.session_state[
+                    "college_id_column"
+                ]
+            ),
+            results=result_mapping,
+            confidence_column_name=(
+                "Confidence Score"
+            ),
         )
 
         st.download_button(
@@ -437,10 +491,6 @@ if "matching_results" in st.session_state:
             f"{error}"
         )
 
-    # -----------------------------------------------------
-    # Display review cases only
-    # -----------------------------------------------------
-
     if review_count > 0:
         st.subheader(
             "Ambiguous colleges requiring review"
@@ -452,20 +502,18 @@ if "matching_results" in st.session_state:
             "safely without verification."
         )
 
-        review_dataframe = (
-            results_dataframe[
-                results_dataframe["decision"]
-                == "NEEDS_REVIEW"
-            ][
-                [
-                    "input_name",
-                    "college_id",
-                    "matched_name",
-                    "confidence",
-                    "reason",
-                ]
-            ].copy()
-        )
+        review_dataframe = results_dataframe[
+            results_dataframe["decision"]
+            == "NEEDS_REVIEW"
+        ][
+            [
+                "input_name",
+                "college_id",
+                "matched_name",
+                "confidence",
+                "reason",
+            ]
+        ].copy()
 
         review_dataframe.columns = [
             "Input College Name",
@@ -481,42 +529,32 @@ if "matching_results" in st.session_state:
             hide_index=True,
         )
 
-    # -----------------------------------------------------
-    # Confidence distribution
-    # -----------------------------------------------------
-
-    st.subheader(
-        "Confidence summary"
-    )
+    st.subheader("Confidence summary")
 
     high_confidence = int(
         (
-            results_dataframe[
-                "confidence"
-            ] >= 95
+            results_dataframe["confidence"]
+            >= 95
         ).sum()
     )
 
     medium_confidence = int(
         (
             (
-                results_dataframe[
-                    "confidence"
-                ] >= 80
+                results_dataframe["confidence"]
+                >= 80
             )
             & (
-                results_dataframe[
-                    "confidence"
-                ] < 95
+                results_dataframe["confidence"]
+                < 95
             )
         ).sum()
     )
 
     low_confidence = int(
         (
-            results_dataframe[
-                "confidence"
-            ] < 80
+            results_dataframe["confidence"]
+            < 80
         ).sum()
     )
 
@@ -539,13 +577,7 @@ if "matching_results" in st.session_state:
         low_confidence,
     )
 
-    # -----------------------------------------------------
-    # Audit-log download
-    # -----------------------------------------------------
-
-    st.subheader(
-        "Audit log"
-    )
+    st.subheader("Audit log")
 
     audit_columns = [
         "input_name",
@@ -556,11 +588,9 @@ if "matching_results" in st.session_state:
         "reason",
     ]
 
-    audit_dataframe = (
-        results_dataframe[
-            audit_columns
-        ].copy()
-    )
+    audit_dataframe = results_dataframe[
+        audit_columns
+    ].copy()
 
     audit_dataframe.columns = [
         "Input College Name",
@@ -591,12 +621,8 @@ if "matching_results" in st.session_state:
         use_container_width=True,
     )
 
-    # -----------------------------------------------------
-    # Reset
-    # -----------------------------------------------------
-
     if st.button(
-        "Reset and Upload New Files",
+        "Reset and Upload New Target File",
         use_container_width=True,
     ):
         keys_to_remove = [
