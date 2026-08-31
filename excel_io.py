@@ -209,7 +209,6 @@ def write_match_results(
             college_id_value = "Not Found"
             displayed_status = "NOT FOUND"
         elif decision == "NEEDS_REVIEW":
-            college_id_value = "Needs Review"
             displayed_status = "NEEDS REVIEW"
         else:
             displayed_status = "FOUND"
