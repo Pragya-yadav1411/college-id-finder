@@ -6,7 +6,7 @@ from io import BytesIO
 import openpyxl
 import pandas as pd
 
-from matcher import normalize
+from matcher import match_context_key
 
 
 def read_first_sheet(uploaded_file) -> tuple[pd.DataFrame, str]:
@@ -92,6 +92,8 @@ def write_match_results(
     input_name_column: str,
     output_id_column: str,
     results: dict[str, dict],
+    input_city_column: str | None = None,
+    input_state_column: str | None = None,
     confidence_column_name: str = "Confidence Score",
     status_column_name: str = "Match Status",
 ) -> bytes:
@@ -120,6 +122,16 @@ def write_match_results(
         )
 
     name_column_number = header_columns[input_name_column]
+    city_column_number = (
+        header_columns.get(input_city_column)
+        if input_city_column
+        else None
+    )
+    state_column_number = (
+        header_columns.get(input_state_column)
+        if input_state_column
+        else None
+    )
     id_column_number = header_columns[output_id_column]
 
     status_column_number = ensure_column_after(
@@ -147,18 +159,48 @@ def write_match_results(
     id_column_number = header_columns[output_id_column]
     status_column_number = header_columns[status_column_name]
     confidence_column_number = header_columns[confidence_column_name]
+    city_column_number = (
+        header_columns.get(input_city_column)
+        if input_city_column
+        else None
+    )
+    state_column_number = (
+        header_columns.get(input_state_column)
+        if input_state_column
+        else None
+    )
 
     for row_number in range(2, worksheet.max_row + 1):
         original_college_name = worksheet.cell(
             row=row_number,
             column=name_column_number,
         ).value
-        normalized_name = normalize(original_college_name)
+        city_value = (
+            worksheet.cell(
+                row=row_number,
+                column=city_column_number,
+            ).value
+            if city_column_number
+            else ""
+        )
+        state_value = (
+            worksheet.cell(
+                row=row_number,
+                column=state_column_number,
+            ).value
+            if state_column_number
+            else ""
+        )
+        result_key = match_context_key(
+            original_college_name,
+            city_value,
+            state_value,
+        )
 
-        if normalized_name not in results:
+        if result_key not in results:
             continue
 
-        result = results[normalized_name]
+        result = results[result_key]
         decision = str(result.get("decision", "NOT_FOUND"))
         college_id_value = result.get("college_id", "Not Found")
         confidence_value = float(result.get("confidence", 0.0) or 0.0)
