@@ -12,6 +12,7 @@ from excel_io import (
 from matcher import (
     CollegeMatcher,
     MATCHER_VERSION,
+    match_context_key,
 )
 
 
@@ -420,6 +421,15 @@ if "matching_results" not in st.session_state:
                     "target_count"
                 ] = target_count
 
+                st.session_state["target_match_keys"] = [
+                    match_context_key(
+                        row[college_name_column],
+                        row[city_column] if city_column else "",
+                        row[state_column] if state_column else "",
+                    )
+                    for _, row in target_dataframe.iterrows()
+                ]
+
                 st.rerun()
 
             except Exception as error:
@@ -461,6 +471,23 @@ if "matching_results" in st.session_state:
         ).sum()
     )
 
+    decision_by_key = {
+        row["match_key"]: row["decision"]
+        for _, row in results_dataframe.iterrows()
+    }
+    target_match_keys = st.session_state.get(
+        "target_match_keys",
+        [],
+    )
+    row_decisions = [
+        decision_by_key.get(key, "NOT_FOUND")
+        for key in target_match_keys
+    ]
+    total_input_rows = len(row_decisions)
+    found_row_count = row_decisions.count("FOUND")
+    review_row_count = row_decisions.count("NEEDS_REVIEW")
+    not_found_row_count = row_decisions.count("NOT_FOUND")
+
     st.success("Automatic matching completed.")
 
     metric_1, metric_2, metric_3, metric_4 = (
@@ -468,23 +495,29 @@ if "matching_results" in st.session_state:
     )
 
     metric_1.metric(
-        "Unique college-campus combinations",
-        total_unique,
+        "Input rows",
+        total_input_rows,
     )
 
     metric_2.metric(
-        "College IDs found",
-        found_count,
+        "Rows with College IDs",
+        found_row_count,
     )
 
     metric_3.metric(
-        "Not Found",
-        not_found_count,
+        "Not Found rows",
+        not_found_row_count,
     )
 
     metric_4.metric(
-        "Needs Review",
-        review_count,
+        "Needs Review rows",
+        review_row_count,
+    )
+
+    st.caption(
+        f"{total_unique:,} unique college-campus combinations were "
+        f"matched across {total_input_rows:,} original rows. Duplicate "
+        "rows are preserved and receive the College ID again."
     )
 
     result_mapping = {
@@ -636,7 +669,12 @@ if "matching_results" in st.session_state:
         low_confidence,
     )
 
-    st.subheader("Audit log")
+    st.subheader("Unique decision audit")
+
+    st.caption(
+        "The audit lists each unique college-campus decision once. "
+        "The downloaded Excel retains every original row, including duplicates."
+    )
 
     audit_columns = [
         "input_name",
@@ -698,6 +736,7 @@ if "matching_results" in st.session_state:
             "state_column",
             "master_count",
             "target_count",
+            "target_match_keys",
         ]
 
         for key in keys_to_remove:
