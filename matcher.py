@@ -79,7 +79,7 @@ ProgressCallback = Callable[
 ]
 
 
-MATCHER_VERSION = "2026.08.31.5-SCET-CORRECTED"
+MATCHER_VERSION = "2026.08.31.6-CITY-RECOVERY"
 
 
 MOJIBAKE_REPLACEMENTS = {
@@ -247,6 +247,17 @@ def normalize(value: object) -> str:
 
     text = text.casefold()
 
+    # Keep dotted initialisms as one identity token: B.M.S. -> bms,
+    # R.M.K. -> rmk and K.S.R. -> ksr. Treating every letter as a
+    # separate word previously prevented obvious master matches.
+    text = re.sub(
+        r"\b(?:[a-z]\s*\.\s*){2,}",
+        lambda match: (
+            re.sub(r"[^a-z]", "", match.group(0)) + " "
+        ),
+        text,
+    )
+
     # Make possessive and non-possessive spellings equivalent:
     # People's -> Peoples, Teachers' -> Teachers.
     text = re.sub(
@@ -285,6 +296,20 @@ def structural_identity(value: object) -> str:
     if not raw_segments:
         return normalize(value)
 
+    identity_markers = {
+        "university", "institute", "college", "school", "faculty",
+        "department", "technology", "engineering", "iit", "nit",
+        "iiit", "bits", "spa",
+    }
+    first_index = 0
+    for index, segment in enumerate(raw_segments):
+        if set(normalize(segment).split()) & identity_markers:
+            first_index = index
+            break
+
+    # Skip legal/promoter prefixes such as "BRACT's" and "The Shirpur
+    # Education Society's" when a later segment names the institution.
+    raw_segments = raw_segments[first_index:]
     first_raw = raw_segments[0]
     first = normalize(first_raw)
 
@@ -310,6 +335,22 @@ def structural_identity(value: object) -> str:
                 return later
 
         return first
+
+    # When a descriptive unit comes first and its university/college is
+    # named in a later segment, keep both identities. Examples include
+    # "College of Engineering, Anna University" and
+    # "Faculty of Engineering, Jadavpur University".
+    leading_subunit = bool(
+        set(first.split())
+        & {"department", "faculty", "school", "college", "institute"}
+    )
+    if leading_subunit:
+        for later_raw in raw_segments[1:]:
+            later = normalize(later_raw)
+            if set(later.split()) & {
+                "university", "college", "institute", "iit", "nit"
+            }:
+                return f"{first} {later}".strip()
 
     return first
 
@@ -504,6 +545,8 @@ class CollegeMatcher:
         "amu zakir hussain college of engineering and technology department of architecture aligarh": 5696,
         "netaji subhas university of technology department of architecture and planning new delhi": 14479,
         "indira gandhi delhi technical university for women department of architecture delhi": 13801,
+        "rajiv gandhi proudyogiki vishwavidyalaya school of architecture bhopal": 25681,
+        "new delhi institute of management ndim": 57120,
     }
 
     SUPPLEMENTAL_VERIFIED_RECORDS = [
@@ -598,6 +641,7 @@ class CollegeMatcher:
         ] = defaultdict(set)
 
         self.city_phrases: set[str] = set()
+        self.city_ids: dict[str, set[int]] = defaultdict(set)
         self.search_variants: list[str] = []
 
         self._build_indexes()
@@ -738,6 +782,7 @@ class CollegeMatcher:
                 self.city_phrases.add(
                     clean_city
                 )
+                self.city_ids[clean_city].add(college_id)
 
             self.college_by_id[
                 college_id
@@ -832,6 +877,13 @@ class CollegeMatcher:
         for alias in CITY_ALIASES:
             self.city_phrases.add(alias)
 
+        # Rebuild city membership after all city phrases are known so a
+        # maintained short form such as "CVR Hyderabad" can supplement a
+        # master City value such as Rangareddy.
+        for college_id, record in self.college_by_id.items():
+            for city in self._record_city_candidates(record):
+                self.city_ids[city].add(college_id)
+
         self.search_variants = list(
             self.variant_ids.keys()
         )
@@ -890,7 +942,39 @@ class CollegeMatcher:
         if city_from_name:
             cities.add(city_from_name)
 
+        city_from_short_form, _ = self.detect_city(
+            record.get("short_form", "")
+        )
+
+        if city_from_short_form:
+            cities.add(city_from_short_form)
+
         return cities
+
+    def _has_unique_acronym_identity(
+        self,
+        input_name: object,
+        college_id: int,
+    ) -> bool:
+        """Whether a maintained acronym uniquely identifies this record."""
+
+        input_tokens = set(normalize(input_name).split())
+        record = self.college_by_id[college_id]
+        acronyms = {
+            value
+            for value in (
+                record.get("short_acronyms", set())
+                | record.get("abbreviations", set())
+            )
+            if len(value) >= 3
+        }
+
+        for acronym in input_tokens & acronyms:
+            matching_ids = self.exact_index.get(acronym, set())
+            if matching_ids == {college_id}:
+                return True
+
+        return False
 
     def _has_location_conflict(
         self,
@@ -916,10 +1000,21 @@ class CollegeMatcher:
             )
         )
 
-        return bool(
+        conflict = bool(
             candidate_cities
             and input_city not in candidate_cities
         )
+
+        if (
+            conflict
+            and self._has_unique_acronym_identity(
+                input_name,
+                college_id,
+            )
+        ):
+            return False
+
+        return conflict
 
     def _explicit_parent_score(
         self,
@@ -935,6 +1030,20 @@ class CollegeMatcher:
             input_tokens
             & PARENT_MARKERS
         ):
+            return None
+
+        candidate_subunits = (
+            set(record["clean_base_name"].split())
+            & {"department", "faculty", "school"}
+        )
+        input_subunits = (
+            input_tokens
+            & {"department", "faculty", "school"}
+        )
+
+        # A general institution input such as BITS Pilani must prefer the
+        # main institution, not "Department of Management, BITS".
+        if candidate_subunits and not input_subunits:
             return None
 
         base_name = record["clean_base_name"]
@@ -1108,22 +1217,23 @@ class CollegeMatcher:
             record["clean_name"]
         )
 
-        candidate_cities = {
-            city
-            for city in (
-                master_city,
-                city_from_candidate_name,
-            )
-            if city
-        }
+        candidate_cities = self._record_city_candidates(record)
 
         # Campus/city conflicts are disqualifying. A matching brand or
         # abbreviation must never map an Indore institution to Bhopal,
         # a Noida institution to Lucknow, and so on.
+        unique_acronym_override = (
+            self._has_unique_acronym_identity(
+                clean_input,
+                college_id,
+            )
+        )
+
         if (
             input_city
             and candidate_cities
             and input_city not in candidate_cities
+            and not unique_acronym_override
         ):
             return Candidate(
                 college_id=college_id,
@@ -1367,6 +1477,17 @@ class CollegeMatcher:
             min(confidence, 100.0),
         )
 
+        if (
+            input_city
+            and candidate_cities
+            and input_city not in candidate_cities
+            and unique_acronym_override
+        ):
+            confidence = min(confidence, 75.0)
+            reason_parts.append(
+                "unique acronym match but city requires review"
+            )
+
         return Candidate(
             college_id=college_id,
             college_name=record[
@@ -1472,6 +1593,16 @@ class CollegeMatcher:
                     self.variant_ids[variant]
                 )
 
+        # City-restricted recovery: fuzzy retrieval can miss spelling
+        # variants and acronyms (COEP, BMSCE, CVR, FISAT, BVRIT, etc.).
+        # Add every master record from the confirmed city, then let name
+        # evidence score them. City narrows the pool but never confirms a
+        # candidate by itself.
+        if input_city:
+            candidate_ids.update(
+                self.city_ids.get(input_city, set())
+            )
+
         candidates = [
             self._score_candidate(
                 clean_input,
@@ -1569,10 +1700,102 @@ class CollegeMatcher:
                 candidates=[],
             )
 
-        exact_ids = self.exact_index.get(
+        # National systems use a common name plus a campus city. Resolve
+        # IIT/NIT/IIIT/IIM/AIIMS deterministically from that combination
+        # instead of comparing them with unrelated same-city colleges.
+        system_acronyms = (
+            set(clean_input.split())
+            & {"iit", "nit", "iiit", "iim", "aiims", "bits"}
+        )
+        system_phrases = {
+            "indian institute of technology": "iit",
+            "national institute of technology": "nit",
+            "indian institute of information technology": "iiit",
+            "indian institute of management": "iim",
+            "birla institute of technology and science": "bits",
+        }
+        for phrase, acronym in system_phrases.items():
+            if phrase in clean_input:
+                system_acronyms.add(acronym)
+        detected_system_city, _ = self.detect_city(contextual_input)
+        if system_acronyms and detected_system_city:
+            input_system_subunits = (
+                set(clean_input.split())
+                & {"department", "faculty", "school"}
+            )
+            system_ids = {
+                college_id
+                for college_id in self.city_ids.get(
+                    detected_system_city,
+                    set(),
+                )
+                if system_acronyms
+                & (
+                    set(self.college_by_id[college_id]["clean_name"].split())
+                    | set(self.college_by_id[college_id]["short_form"].split())
+                )
+                and (
+                    input_system_subunits
+                    or not (
+                        set(self.college_by_id[college_id]["clean_name"].split())
+                        & {"department", "faculty", "school", "digital", "wilp"}
+                    )
+                )
+            }
+
+            if len(system_ids) == 1:
+                college_id = next(iter(system_ids))
+                record = self.college_by_id[college_id]
+                return MatchDecision(
+                    input_name=original_name,
+                    normalized_name=clean_input,
+                    college_id=college_id,
+                    matched_name=record["college_name"],
+                    confidence=99.0,
+                    decision="FOUND",
+                    reason="National institution acronym and city confirmed",
+                    candidates=[],
+                )
+
+        all_exact_ids = self.exact_index.get(
             identity_input,
             set(),
         )
+
+        conflicting_exact_ids = {
+            college_id
+            for college_id in all_exact_ids
+            if self._has_location_conflict(
+                contextual_input,
+                college_id,
+            )
+        }
+
+        # Some master rows use a nearby district/suburb while the input
+        # uses the better-known metro. A unique literal institution match
+        # is retained for review instead of being discarded. Explicitly
+        # blocked cross-campus cases are handled before this route.
+        if (
+            len(all_exact_ids) == 1
+            and conflicting_exact_ids == all_exact_ids
+        ):
+            college_id = next(iter(all_exact_ids))
+            record = self.college_by_id[college_id]
+            return MatchDecision(
+                input_name=original_name,
+                normalized_name=clean_input,
+                college_id=college_id,
+                matched_name=record["college_name"],
+                confidence=70.0,
+                decision="NEEDS_REVIEW",
+                reason=(
+                    "Unique institution name; input city differs from "
+                    "the master city and requires verification"
+                ),
+                candidates=[],
+            )
+
+        exact_ids = all_exact_ids
 
         # Exact aliases and short forms are still subject to campus
         # validation. No exact/variant route can bypass a city conflict.
@@ -1739,11 +1962,11 @@ class CollegeMatcher:
                 candidates=candidates,
             )
 
-        # No meaningful name overlap means the college
-        # must not be assigned merely because of its city.
+        # No meaningful name overlap means the college must not be
+        # suggested merely because of its city.
         if (
             best.token_overlap == 0
-            or best.confidence < 60
+            or best.confidence < 20
         ):
             return MatchDecision(
                 input_name=original_name,
@@ -1764,9 +1987,9 @@ class CollegeMatcher:
         return MatchDecision(
             input_name=original_name,
             normalized_name=clean_input,
-            # Strict mode: an uncertain candidate never becomes a
-            # numeric College ID in the output.
-            college_id="Needs Review",
+            # Review mode: retain the best credible candidate ID so the
+            # user can verify it alongside the confidence score.
+            college_id=best.college_id,
             matched_name=(
                 best.college_name
             ),
