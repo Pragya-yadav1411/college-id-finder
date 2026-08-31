@@ -7,7 +7,60 @@ from dataclasses import dataclass
 from typing import Callable, Iterable
 
 import pandas as pd
-from rapidfuzz import fuzz, process
+
+try:
+    from rapidfuzz import fuzz, process
+except ImportError:  # Safe fallback for restricted deployments.
+    from difflib import SequenceMatcher
+
+    class _FallbackFuzz:
+        @staticmethod
+        def _ratio(left: object, right: object) -> float:
+            return 100.0 * SequenceMatcher(
+                None,
+                str(left),
+                str(right),
+            ).ratio()
+
+        WRatio = _ratio
+        token_sort_ratio = staticmethod(
+            lambda left, right: _FallbackFuzz._ratio(
+                " ".join(sorted(str(left).split())),
+                " ".join(sorted(str(right).split())),
+            )
+        )
+        token_set_ratio = staticmethod(
+            lambda left, right: _FallbackFuzz._ratio(
+                " ".join(sorted(set(str(left).split()))),
+                " ".join(sorted(set(str(right).split()))),
+            )
+        )
+
+    class _FallbackProcess:
+        @staticmethod
+        def extract(
+            query: object,
+            choices: Iterable[object],
+            scorer,
+            limit: int = 5,
+            score_cutoff: float = 0,
+        ) -> list[tuple[object, float, int]]:
+            scored = [
+                (choice, scorer(query, choice), index)
+                for index, choice in enumerate(choices)
+            ]
+            return [
+                item
+                for item in sorted(
+                    scored,
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+                if item[1] >= score_cutoff
+            ][:limit]
+
+    fuzz = _FallbackFuzz()
+    process = _FallbackProcess()
 
 
 ProgressCallback = Callable[
@@ -16,7 +69,7 @@ ProgressCallback = Callable[
 ]
 
 
-MATCHER_VERSION = "2026.08.25.5-STRICT"
+MATCHER_VERSION = "2026.08.31.1-CAMPUS-AWARE"
 
 
 MOJIBAKE_REPLACEMENTS = {
@@ -195,6 +248,22 @@ def normalize(value: object) -> str:
     )
 
     return " ".join(text.split())
+
+
+def match_context_key(
+    college_name: object,
+    city: object = "",
+    state: object = "",
+) -> str:
+    """Stable key that keeps same-name campuses separate."""
+
+    return "||".join(
+        [
+            normalize(college_name),
+            canonical_city(city),
+            normalize(state),
+        ]
+    )
 
 
 def remove_bracket_alias(
@@ -1204,6 +1273,8 @@ class CollegeMatcher:
     def match_one(
         self,
         input_name: object,
+        input_city_value: object = "",
+        input_state_value: object = "",
     ) -> MatchDecision:
         original_name = (
             ""
@@ -1214,6 +1285,20 @@ class CollegeMatcher:
         clean_input = normalize(
             input_name
         )
+
+        clean_context_city = canonical_city(
+            input_city_value
+        )
+
+        contextual_input = original_name
+
+        if clean_context_city:
+            name_city, _ = self.detect_city(original_name)
+
+            if not name_city:
+                contextual_input = (
+                    f"{original_name} {input_city_value}"
+                ).strip()
 
         if clean_input in self.VERIFIED_NOT_FOUND_INPUTS:
             return MatchDecision(
@@ -1240,7 +1325,7 @@ class CollegeMatcher:
             verified_college_id is not None
             and verified_college_id in self.college_by_id
             and not self._has_location_conflict(
-                input_name,
+                contextual_input,
                 verified_college_id,
             )
         ):
@@ -1270,10 +1355,39 @@ class CollegeMatcher:
             college_id
             for college_id in exact_ids
             if not self._has_location_conflict(
-                input_name,
+                contextual_input,
                 college_id,
             )
         }
+
+        # Prefer a literal master college-name match over an unrelated
+        # institution that merely produces the same abbreviation. This
+        # resolves inputs such as "IBS" + Hyderabad to the master row
+        # whose actual College Name is IBS.
+        literal_name_ids = {
+            college_id
+            for college_id in exact_ids
+            if self.college_by_id[college_id]["clean_name"] == clean_input
+            or self.college_by_id[college_id]["clean_base_name"] == clean_input
+        }
+
+        if literal_name_ids:
+            exact_ids = literal_name_ids
+
+        # Some master sheets contain duplicate name+city records. Prefer
+        # the record whose maintained short form spells out the same base
+        # identity; this is more specific than a bare acronym+city alias.
+        if len(exact_ids) > 1:
+            clean_input_base = remove_bracket_alias(input_name)
+            full_identity_ids = {
+                college_id
+                for college_id in exact_ids
+                if self.college_by_id[college_id]["short_form"]
+                == clean_input_base
+            }
+
+            if len(full_identity_ids) == 1:
+                exact_ids = full_identity_ids
 
         if len(exact_ids) == 1:
             college_id = next(
@@ -1301,7 +1415,7 @@ class CollegeMatcher:
 
         candidates = (
             self.get_ranked_candidates(
-                input_name,
+                contextual_input,
                 limit=5,
             )
         )
@@ -1313,7 +1427,7 @@ class CollegeMatcher:
             candidate
             for candidate in candidates
             if not self._has_location_conflict(
-                input_name,
+                contextual_input,
                 candidate.college_id,
             )
         ]
@@ -1346,7 +1460,7 @@ class CollegeMatcher:
         )
 
         input_city, _ = self.detect_city(
-            input_name
+            contextual_input
         )
 
         automatic_match = False
@@ -1441,27 +1555,57 @@ class CollegeMatcher:
     def match_all(
         self,
         names: Iterable[object],
+        cities: Iterable[object] | None = None,
+        states: Iterable[object] | None = None,
         progress_callback: (
             ProgressCallback | None
         ) = None,
     ) -> pd.DataFrame:
-        unique_inputs: dict[
-            str,
-            object,
-        ] = {}
+        name_values = list(names)
+        city_values = (
+            list(cities)
+            if cities is not None
+            else [""] * len(name_values)
+        )
+        state_values = (
+            list(states)
+            if states is not None
+            else [""] * len(name_values)
+        )
 
-        for original_name in names:
+        if not (
+            len(name_values)
+            == len(city_values)
+            == len(state_values)
+        ):
+            raise ValueError(
+                "Name, city and state columns must have equal row counts."
+            )
+
+        unique_inputs: dict[str, tuple[object, object, object]] = {}
+
+        for original_name, city, state in zip(
+            name_values,
+            city_values,
+            state_values,
+        ):
             normalized_name = normalize(
                 original_name
             )
 
+            context_key = match_context_key(
+                original_name,
+                city,
+                state,
+            )
+
             if (
-                normalized_name
+                context_key
                 not in unique_inputs
             ):
                 unique_inputs[
-                    normalized_name
-                ] = original_name
+                    context_key
+                ] = (original_name, city, state)
 
         items = list(
             unique_inputs.items()
@@ -1471,14 +1615,18 @@ class CollegeMatcher:
         output_rows = []
 
         for position, (
-            normalized_name,
-            original_name,
+            context_key,
+            input_values,
         ) in enumerate(
             items,
             start=1,
         ):
+            original_name, city, state = input_values
+
             decision = self.match_one(
-                original_name
+                original_name,
+                input_city_value=city,
+                input_state_value=state,
             )
 
             output_rows.append(
@@ -1487,7 +1635,16 @@ class CollegeMatcher:
                         decision.input_name
                     ),
                     "normalized_name": (
-                        normalized_name
+                        normalize(original_name)
+                    ),
+                    "match_key": (
+                        context_key
+                    ),
+                    "input_city": (
+                        "" if pd.isna(city) else str(city)
+                    ),
+                    "input_state": (
+                        "" if pd.isna(state) else str(state)
                     ),
                     "decision": (
                         decision.decision
