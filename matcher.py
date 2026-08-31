@@ -79,7 +79,7 @@ ProgressCallback = Callable[
 ]
 
 
-MATCHER_VERSION = "2026.08.31.2-PARENT-AWARE"
+MATCHER_VERSION = "2026.08.31.3-STRUCTURE-AWARE"
 
 
 MOJIBAKE_REPLACEMENTS = {
@@ -272,6 +272,48 @@ def normalize(value: object) -> str:
     return " ".join(text.split())
 
 
+def structural_identity(value: object) -> str:
+    """Extract the institution and ignore descriptive sub-unit suffixes."""
+
+    raw_value = "" if value is None else str(value)
+    raw_segments = [
+        segment.strip()
+        for segment in raw_value.split(",")
+        if segment.strip()
+    ]
+
+    if not raw_segments:
+        return normalize(value)
+
+    first_raw = raw_segments[0]
+    first = normalize(first_raw)
+
+    # A named college after a prefix is more specific than the prefix:
+    # "AMU - Zakir Hussain College ..." and "CET - College ...".
+    hyphen_parts = re.split(r"\s+-\s+", first_raw, maxsplit=1)
+    if len(hyphen_parts) == 2:
+        named_part = normalize(hyphen_parts[1])
+        if " college " in f" {named_part} ":
+            return named_part
+
+    first_is_parent = bool(
+        set(first.split()) & {"university", "technology"}
+    )
+
+    if first_is_parent:
+        # A separately named constituent college (such as Sir J. J.
+        # College) wins. Department/faculty/school/institute phrases are
+        # sub-units and must not redirect the match to a department page.
+        for later_raw in raw_segments[1:]:
+            later = normalize(later_raw)
+            if " college " in f" {later} ":
+                return later
+
+        return first
+
+    return first
+
+
 def match_context_key(
     college_name: object,
     city: object = "",
@@ -428,7 +470,11 @@ class CollegeMatcher:
     # Deterministic verified rules. They are used only when the specified
     # College ID is present in the currently loaded master database.
     VERIFIED_INPUT_TO_COLLEGE_ID = {
+        "ln medical college bhopal": 57033,
         "peoples college of dental sciences and research centre bhopal": 58702,
+        "mit art design and technology university mitadt": 57115,
+        "balaji college of arts commerce and science bcacs": 472,
+        "mit arts commerce and science college mitacsc": 59308,
         "iit kharagpur department of architecture and regional planning indian institute of technology kharagpur": 26007,
         "iit roorkee department of architecture and planning indian institute of technology roorkee": 25992,
         "indian institute of technology bhu varanasi department of architecture planning and design varanasi": 25947,
@@ -445,7 +491,7 @@ class CollegeMatcher:
         "goa college of architecture panaji": 5586,
         "nit kozhikode national institute of technology faculty of architecture kozhikode": 25651,
         "andhra university department of architecture visakhapatnam": 25346,
-        "dr a p j abdul kalam technical university faculty of architecture lucknow": 56813,
+        "dr a p j abdul kalam technical university faculty of architecture lucknow": 25941,
         "government engineering college school of architecture and planning thrissur": 13614,
         "bundelkhand university institute of architecture and town planning jhansi": 25927,
         "hemchandracharya north gujarat university institute of architecture patan": 25493,
@@ -454,7 +500,10 @@ class CollegeMatcher:
         "veer surendra sai university of technology department of architecture sambalpur": 25771,
         "mizoram university department of planning and architecture tanhril": 25749,
         "rajiv gandhi government engineering college school of architecture kangra": 60047,
-        "sarvajanik university institute of design planning and technology scet idpt scet surat": 63787,
+        "sarvajanik university institute of design planning and technology scet idpt scet surat": 63674,
+        "amu zakir hussain college of engineering and technology department of architecture aligarh": 5696,
+        "netaji subhas university of technology department of architecture and planning new delhi": 14479,
+        "indira gandhi delhi technical university for women department of architecture delhi": 13801,
     }
 
     SUPPLEMENTAL_VERIFIED_RECORDS = [
@@ -1458,6 +1507,10 @@ class CollegeMatcher:
             input_name
         )
 
+        identity_input = structural_identity(
+            original_name
+        )
+
         clean_context_city = canonical_city(
             input_city_value
         )
@@ -1517,7 +1570,7 @@ class CollegeMatcher:
             )
 
         exact_ids = self.exact_index.get(
-            clean_input,
+            identity_input,
             set(),
         )
 
@@ -1539,8 +1592,8 @@ class CollegeMatcher:
         literal_name_ids = {
             college_id
             for college_id in exact_ids
-            if self.college_by_id[college_id]["clean_name"] == clean_input
-            or self.college_by_id[college_id]["clean_base_name"] == clean_input
+            if self.college_by_id[college_id]["clean_name"] == identity_input
+            or self.college_by_id[college_id]["clean_base_name"] == identity_input
         }
 
         if literal_name_ids:
@@ -1550,7 +1603,7 @@ class CollegeMatcher:
         # the record whose maintained short form spells out the same base
         # identity; this is more specific than a bare acronym+city alias.
         if len(exact_ids) > 1:
-            clean_input_base = remove_bracket_alias(input_name)
+            clean_input_base = remove_bracket_alias(identity_input)
             full_identity_ids = {
                 college_id
                 for college_id in exact_ids
@@ -1585,9 +1638,14 @@ class CollegeMatcher:
                 candidates=[],
             )
 
+        ranking_input = identity_input
+        detected_city, _ = self.detect_city(contextual_input)
+        if detected_city and detected_city not in ranking_input:
+            ranking_input = f"{ranking_input} {detected_city}".strip()
+
         candidates = (
             self.get_ranked_candidates(
-                contextual_input,
+                ranking_input,
                 limit=5,
             )
         )
