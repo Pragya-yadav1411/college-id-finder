@@ -28,6 +28,35 @@ st.caption(
     f"Matcher version: {MATCHER_VERSION}"
 )
 
+# A Streamlit browser session can survive a GitHub redeployment. Never
+# allow results calculated by an older matcher to be downloaded under a
+# newer version label.
+if (
+    "matching_results" in st.session_state
+    and st.session_state.get("results_matcher_version")
+    != MATCHER_VERSION
+):
+    for stale_key in [
+        "matching_results",
+        "target_file_bytes",
+        "target_sheet_name",
+        "college_name_column",
+        "college_id_column",
+        "city_column",
+        "state_column",
+        "master_count",
+        "target_count",
+        "target_match_keys",
+        "target_audit_rows",
+        "results_matcher_version",
+    ]:
+        st.session_state.pop(stale_key, None)
+
+    st.warning(
+        "The matcher was updated. Old results were cleared; "
+        "please upload and process the workbook again."
+    )
+
 st.write(
     """
     Upload the target college workbook. The Collegedunia
@@ -393,6 +422,10 @@ if "matching_results" not in st.session_state:
                 st.session_state[
                     "matching_results"
                 ] = matching_results
+
+                st.session_state[
+                    "results_matcher_version"
+                ] = MATCHER_VERSION
 
                 st.session_state[
                     "target_file_bytes"
@@ -786,6 +819,7 @@ if "matching_results" in st.session_state:
             "target_count",
             "target_match_keys",
             "target_audit_rows",
+            "results_matcher_version",
         ]
 
         for key in keys_to_remove:
