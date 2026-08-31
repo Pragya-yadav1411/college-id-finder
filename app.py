@@ -430,6 +430,24 @@ if "matching_results" not in st.session_state:
                     for _, row in target_dataframe.iterrows()
                 ]
 
+                st.session_state["target_audit_rows"] = [
+                    {
+                        "match_key": match_context_key(
+                            row[college_name_column],
+                            row[city_column] if city_column else "",
+                            row[state_column] if state_column else "",
+                        ),
+                        "input_name": row[college_name_column],
+                        "input_city": (
+                            row[city_column] if city_column else ""
+                        ),
+                        "input_state": (
+                            row[state_column] if state_column else ""
+                        ),
+                    }
+                    for _, row in target_dataframe.iterrows()
+                ]
+
                 st.rerun()
 
             except Exception as error:
@@ -669,11 +687,11 @@ if "matching_results" in st.session_state:
         low_confidence,
     )
 
-    st.subheader("Unique decision audit")
+    st.subheader("Complete row-level audit")
 
     st.caption(
-        "The audit lists each unique college-campus decision once. "
-        "The downloaded Excel retains every original row, including duplicates."
+        "Every original input row is listed below. Duplicate colleges are "
+        "preserved and receive the same verified College ID again."
     )
 
     audit_columns = [
@@ -687,9 +705,39 @@ if "matching_results" in st.session_state:
         "reason",
     ]
 
-    audit_dataframe = results_dataframe[
-        audit_columns
-    ].copy()
+    result_records_by_key = {
+        row["match_key"]: row
+        for _, row in results_dataframe.iterrows()
+    }
+
+    expanded_audit_rows = []
+    for source_row in st.session_state.get(
+        "target_audit_rows",
+        [],
+    ):
+        result_row = result_records_by_key.get(
+            source_row["match_key"]
+        )
+        if result_row is None:
+            continue
+
+        expanded_audit_rows.append(
+            {
+                "input_name": source_row["input_name"],
+                "input_city": source_row["input_city"],
+                "input_state": source_row["input_state"],
+                "decision": result_row["decision"],
+                "college_id": result_row["college_id"],
+                "matched_name": result_row["matched_name"],
+                "confidence": result_row["confidence"],
+                "reason": result_row["reason"],
+            }
+        )
+
+    audit_dataframe = pd.DataFrame(
+        expanded_audit_rows,
+        columns=audit_columns,
+    )
 
     audit_dataframe.columns = [
         "Input College Name",
@@ -737,6 +785,7 @@ if "matching_results" in st.session_state:
             "master_count",
             "target_count",
             "target_match_keys",
+            "target_audit_rows",
         ]
 
         for key in keys_to_remove:
