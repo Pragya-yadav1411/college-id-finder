@@ -45,9 +45,19 @@ except ImportError:  # Safe fallback for restricted deployments.
             limit: int = 5,
             score_cutoff: float = 0,
         ) -> list[tuple[object, float, int]]:
+            choice_values = list(choices)
+            query_tokens = set(str(query).split())
+            narrowed_choices = [
+                (index, choice)
+                for index, choice in enumerate(choice_values)
+                if query_tokens & set(str(choice).split())
+            ]
+            if not narrowed_choices:
+                narrowed_choices = list(enumerate(choice_values))
+
             scored = [
                 (choice, scorer(query, choice), index)
-                for index, choice in enumerate(choices)
+                for index, choice in narrowed_choices
             ]
             return [
                 item
@@ -69,7 +79,7 @@ ProgressCallback = Callable[
 ]
 
 
-MATCHER_VERSION = "2026.08.31.1-CAMPUS-AWARE"
+MATCHER_VERSION = "2026.08.31.2-PARENT-AWARE"
 
 
 MOJIBAKE_REPLACEMENTS = {
@@ -121,6 +131,17 @@ CITY_ALIASES = {
     "ahmedabad": "ahmedabad",
     "chandigarh": "chandigarh",
     "dehradun": "dehradun",
+    "calicut": "kozhikode",
+    "kozhikode": "kozhikode",
+    "trichy": "tiruchirappalli",
+    "tiruchirapalli": "tiruchirappalli",
+    "tiruchirappalli": "tiruchirappalli",
+    "panji": "panaji",
+    "panaji": "panaji",
+    "vadodra": "vadodara",
+    "burla": "sambalpur",
+    "sambalpur": "sambalpur",
+    "shibpur": "shibpur",
 }
 
 
@@ -131,6 +152,7 @@ PARENT_MARKERS = {
     "centre",
     "center",
     "academy",
+    "institute",
 }
 
 
@@ -407,11 +429,51 @@ class CollegeMatcher:
     # College ID is present in the currently loaded master database.
     VERIFIED_INPUT_TO_COLLEGE_ID = {
         "peoples college of dental sciences and research centre bhopal": 58702,
+        "iit kharagpur department of architecture and regional planning indian institute of technology kharagpur": 26007,
+        "iit roorkee department of architecture and planning indian institute of technology roorkee": 25992,
+        "indian institute of technology bhu varanasi department of architecture planning and design varanasi": 25947,
+        "iiest shibpur department of architecture and planning shibpur": 28330,
+        "cet college of engineering trivandrum department of architecture thiruvananthapuram": 5563,
+        "nit calicut national institute of technology department of architecture and planning kozhikode": 25651,
+        "nit trichy department of architecture tiruchirapalli": 25889,
+        "jamia millia islamia faculty of architecture and ekistics new delhi": 25460,
+        "vnit nagpur department of architecture and planning nagpur": 25733,
+        "anna university school of architecture and planning chennai": 56307,
+        "jadavpur university faculty of architecture kolkata": 26008,
+        "maharaja sayajirao university of baroda vadodra": 25500,
+        "university of mumbai sir j j college of architecture mumbai": 5680,
+        "goa college of architecture panaji": 5586,
+        "nit kozhikode national institute of technology faculty of architecture kozhikode": 25651,
+        "andhra university department of architecture visakhapatnam": 25346,
+        "dr a p j abdul kalam technical university faculty of architecture lucknow": 56813,
+        "government engineering college school of architecture and planning thrissur": 13614,
+        "bundelkhand university institute of architecture and town planning jhansi": 25927,
+        "hemchandracharya north gujarat university institute of architecture patan": 25493,
+        "mbm university department of architecture jodhpur": 14122,
+        "gautam buddha university department of architecture and regional planning greater noida": 25942,
+        "veer surendra sai university of technology department of architecture sambalpur": 25771,
+        "mizoram university department of planning and architecture tanhril": 25749,
+        "rajiv gandhi government engineering college school of architecture kangra": 60047,
+        "sarvajanik university institute of design planning and technology scet idpt scet surat": 63787,
     }
+
+    SUPPLEMENTAL_VERIFIED_RECORDS = [
+        {
+            "College Id": 60047,
+            "College Name": (
+                "Rajiv Gandhi Govt Engineering College - [RGGEC]"
+            ),
+            "City": "Kangra",
+            "State": "Himachal Pradesh",
+            "Short_form": "RGGEC Kangra",
+            "College Type": "Government",
+        }
+    ]
 
     # Confirmed absent institutions cannot inherit another campus ID.
     VERIFIED_NOT_FOUND_INPUTS = {
         "lnct medical college and sewakunj hospital indore",
+        "school of architecture soar j jammu",
     }
 
     def __init__(
@@ -434,6 +496,28 @@ class CollegeMatcher:
 
         self.master = master_dataframe.copy()
 
+        existing_ids = set(
+            pd.to_numeric(
+                self.master["College Id"],
+                errors="coerce",
+            ).dropna().astype(int)
+        )
+
+        supplemental_rows = [
+            row
+            for row in self.SUPPLEMENTAL_VERIFIED_RECORDS
+            if int(row["College Id"]) not in existing_ids
+        ]
+
+        if supplemental_rows:
+            self.master = pd.concat(
+                [
+                    self.master,
+                    pd.DataFrame(supplemental_rows),
+                ],
+                ignore_index=True,
+            )
+
         if "Short_form" not in self.master:
             self.master["Short_form"] = ""
 
@@ -455,6 +539,11 @@ class CollegeMatcher:
         ] = defaultdict(set)
 
         self.variant_ids: dict[
+            str,
+            set[int],
+        ] = defaultdict(set)
+
+        self.identity_token_ids: dict[
             str,
             set[int],
         ] = defaultdict(set)
@@ -550,11 +639,26 @@ class CollegeMatcher:
                 short_form
             )
 
+            short_acronyms = {
+                normalize(token)
+                for token in re.findall(
+                    r"\b[A-Z][A-Z0-9]{2,}\b",
+                    short_form,
+                )
+            }
+
             raw_city = normalize(city)
 
             clean_city = canonical_city(
                 city
             )
+
+            def without_record_city(tokens: set[str]) -> set[str]:
+                return {
+                    token
+                    for token in tokens
+                    if canonical_city(token) != clean_city
+                }
 
             name_without_city = clean_base_name
 
@@ -602,7 +706,22 @@ class CollegeMatcher:
                 "clean_city": clean_city,
                 "state": state,
                 "college_type": college_type,
+                "parent_identity_tokens": (
+                    without_record_city(
+                        meaningful_tokens(clean_base_name)
+                    ),
+                    without_record_city(
+                        meaningful_tokens(clean_short_form)
+                    ),
+                ),
+                "short_acronyms": short_acronyms,
             }
+
+            for identity_tokens in self.college_by_id[
+                college_id
+            ]["parent_identity_tokens"]:
+                for token in identity_tokens:
+                    self.identity_token_ids[token].add(college_id)
 
             # Include both raw and standardized city forms.
             variants = {
@@ -769,39 +888,88 @@ class CollegeMatcher:
         ):
             return None
 
-        base_name = record[
-            "clean_base_name"
-        ]
+        base_name = record["clean_base_name"]
+        short_form = record["short_form"]
 
-        if not is_valid_parent_name(
-            base_name
-        ):
+        if not is_valid_parent_name(base_name):
             return None
 
-        if (
-            f" {base_name} "
-            not in f" {clean_input} "
+        input_tokens = meaningful_tokens(clean_input)
+        base_tokens, short_tokens = record.get(
+            "parent_identity_tokens",
+            (
+                meaningful_tokens(base_name),
+                meaningful_tokens(short_form),
+            ),
+        )
+
+        identity_matches = []
+
+        for source, identity_tokens in (
+            ("base", base_tokens),
+            ("short", short_tokens),
         ):
+            if not identity_tokens:
+                continue
+
+            # A full distinctive identity contained anywhere in a long
+            # department/faculty label is stronger than word order.
+            if (
+                len(identity_tokens) >= 2
+                and identity_tokens.issubset(input_tokens)
+            ):
+                identity_matches.append(identity_tokens)
+
+            # Permit a single maintained acronym only with an exact city.
+            elif (
+                source == "short"
+                and len(identity_tokens) == 1
+                and len(next(iter(identity_tokens))) >= 3
+                and identity_tokens.issubset(input_tokens)
+                and next(iter(identity_tokens))
+                in record.get("short_acronyms", set())
+                and next(iter(identity_tokens)) != input_city
+                and next(iter(identity_tokens)) != record["clean_city"]
+                and input_city
+                and input_city == record["clean_city"]
+            ):
+                identity_matches.append(identity_tokens)
+
+        if not identity_matches:
             return None
 
-        master_city = record[
-            "clean_city"
-        ]
+        master_city = record["clean_city"]
+        accepted_cities = self._record_city_candidates(record)
 
         if (
             input_city
-            and master_city
-            and input_city != master_city
+            and accepted_cities
+            and input_city not in accepted_cities
         ):
             return None
 
-        if (
-            input_city
-            and input_city == master_city
-        ):
-            return 99.5
+        specificity = max(
+            len(tokens)
+            for tokens in identity_matches
+        )
 
-        return 97.0
+        first_input_token = clean_input.split()[0] if clean_input else ""
+        acronym_prefix_bonus = (
+            0.8
+            if first_input_token in record.get("short_acronyms", set())
+            else 0.0
+        )
+
+        if input_city and input_city in accepted_cities:
+            return min(
+                100.0,
+                98.0 + specificity * 0.4 + acronym_prefix_bonus,
+            )
+
+        return min(
+            99.0,
+            96.0 + specificity * 0.4 + acronym_prefix_bonus,
+        )
 
     def _calculate_token_overlap(
         self,
@@ -936,6 +1104,28 @@ class CollegeMatcher:
             & DOMAIN_MARKERS
         )
 
+        parent_score = self._explicit_parent_score(
+            clean_input,
+            record,
+            input_city,
+        )
+
+        # A department/faculty label may describe a different academic
+        # domain from the parent name (for example Architecture at VNIT).
+        # A deterministic parent identity plus matching campus is allowed
+        # before the general category-conflict rejection.
+        if parent_score is not None:
+            return Candidate(
+                college_id=college_id,
+                college_name=record["college_name"],
+                city=record["city"],
+                state=record["state"],
+                college_type=record["college_type"],
+                confidence=parent_score,
+                token_overlap=1.0,
+                reason="Explicit parent institution",
+            )
+
         # A shared brand/abbreviation is not enough when the institution
         # category conflicts. LN Medical College must never map to an LN
         # Pharmacy, Dental, Engineering or Management institution.
@@ -958,32 +1148,6 @@ class CollegeMatcher:
                     "Rejected: institution-category conflict "
                     f"({sorted(input_domain_markers)} vs "
                     f"{sorted(candidate_domain_markers)})"
-                ),
-            )
-
-        parent_score = (
-            self._explicit_parent_score(
-                clean_input,
-                record,
-                input_city,
-            )
-        )
-
-        if parent_score is not None:
-            return Candidate(
-                college_id=college_id,
-                college_name=record[
-                    "college_name"
-                ],
-                city=record["city"],
-                state=record["state"],
-                college_type=record[
-                    "college_type"
-                ],
-                confidence=parent_score,
-                token_overlap=1.0,
-                reason=(
-                    "Explicit parent institution"
                 ),
             )
 
@@ -1209,47 +1373,55 @@ class CollegeMatcher:
                 )
             )
 
-        raw_matches = process.extract(
-            clean_input,
-            self.search_variants,
-            scorer=fuzz.WRatio,
-            limit=100,
-            score_cutoff=25,
-        )
-
         candidate_ids = set()
 
-        for variant, _, _ in raw_matches:
-            candidate_ids.update(
-                self.variant_ids[variant]
-            )
-
-        # Add explicitly named parent institutions.
+        # Add explicitly named parent institutions. This deterministic
+        # scan prevents a long department label from dropping its parent
+        # merely because the fuzzy search returned only shorter phrases.
         if (
             set(clean_input.split())
             & PARENT_MARKERS
         ):
-            padded_input = (
-                f" {clean_input} "
-            )
+            parent_candidate_pool = set()
+            for token in meaningful_tokens(clean_input):
+                parent_candidate_pool.update(
+                    self.identity_token_ids.get(token, set())
+                )
 
-            for college_id, record in (
-                self.college_by_id.items()
-            ):
-                base_name = record[
-                    "clean_base_name"
-                ]
-
+            for college_id in parent_candidate_pool:
+                record = self.college_by_id[college_id]
                 if (
-                    is_valid_parent_name(
-                        base_name
+                    self._explicit_parent_score(
+                        clean_input,
+                        record,
+                        input_city,
                     )
-                    and f" {base_name} "
-                    in padded_input
+                    is not None
+                    and not self._has_location_conflict(
+                        input_name,
+                        college_id,
+                    )
                 ):
                     candidate_ids.add(
                         college_id
                     )
+
+        # When a long department/faculty string deterministically names
+        # its parent, do not let unrelated fuzzy candidates compete with
+        # that verified identity. Use fuzzy retrieval only as fallback.
+        if not candidate_ids:
+            raw_matches = process.extract(
+                clean_input,
+                self.search_variants,
+                scorer=fuzz.WRatio,
+                limit=100,
+                score_cutoff=25,
+            )
+
+            for variant, _, _ in raw_matches:
+                candidate_ids.update(
+                    self.variant_ids[variant]
+                )
 
         candidates = [
             self._score_candidate(
