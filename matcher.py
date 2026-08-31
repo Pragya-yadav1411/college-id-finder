@@ -79,7 +79,7 @@ ProgressCallback = Callable[
 ]
 
 
-MATCHER_VERSION = "2026.08.31.4-FRESH-RESULTS"
+MATCHER_VERSION = "2026.08.31.5-SCET-CORRECTED"
 
 
 MOJIBAKE_REPLACEMENTS = {
@@ -500,7 +500,7 @@ class CollegeMatcher:
         "veer surendra sai university of technology department of architecture sambalpur": 25771,
         "mizoram university department of planning and architecture tanhril": 25749,
         "rajiv gandhi government engineering college school of architecture kangra": 60047,
-        "sarvajanik university institute of design planning and technology scet idpt scet surat": 63674,
+        "sarvajanik university institute of design planning and technology scet idpt scet surat": 14954,
         "amu zakir hussain college of engineering and technology department of architecture aligarh": 5696,
         "netaji subhas university of technology department of architecture and planning new delhi": 14479,
         "indira gandhi delhi technical university for women department of architecture delhi": 13801,
