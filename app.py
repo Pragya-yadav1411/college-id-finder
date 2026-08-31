@@ -128,6 +128,25 @@ def find_default_column_index(
     return 0
 
 
+def find_optional_column(
+    columns: list[object],
+    preferred_names: list[str],
+) -> str | None:
+    normalized = {
+        normalized_column_name(column): str(column)
+        for column in columns
+    }
+
+    for preferred_name in preferred_names:
+        match = normalized.get(
+            normalized_column_name(preferred_name)
+        )
+        if match is not None:
+            return match
+
+    return None
+
+
 # ---------------------------------------------------------
 # Upload screen
 # ---------------------------------------------------------
@@ -230,6 +249,27 @@ if "matching_results" not in st.session_state:
             index=default_id_index,
         )
 
+        city_column = find_optional_column(
+            target_columns,
+            ["City", "College City", "Institute City"],
+        )
+        state_column = find_optional_column(
+            target_columns,
+            ["State", "College State", "Institute State"],
+        )
+
+        detected_context = [
+            column
+            for column in [city_column, state_column]
+            if column
+        ]
+        if detected_context:
+            st.info(
+                "Campus context detected: "
+                + ", ".join(detected_context)
+                + ". These columns will separate same-name campuses."
+            )
+
         if college_name_column == college_id_column:
             st.warning(
                 "The college-name column and College-ID output "
@@ -324,6 +364,16 @@ if "matching_results" not in st.session_state:
                     target_dataframe[
                         college_name_column
                     ],
+                    cities=(
+                        target_dataframe[city_column]
+                        if city_column
+                        else None
+                    ),
+                    states=(
+                        target_dataframe[state_column]
+                        if state_column
+                        else None
+                    ),
                     progress_callback=(
                         update_matching_progress
                     ),
@@ -358,6 +408,9 @@ if "matching_results" not in st.session_state:
                 st.session_state[
                     "college_id_column"
                 ] = college_id_column
+
+                st.session_state["city_column"] = city_column
+                st.session_state["state_column"] = state_column
 
                 st.session_state[
                     "master_count"
@@ -415,7 +468,7 @@ if "matching_results" in st.session_state:
     )
 
     metric_1.metric(
-        "Unique colleges",
+        "Unique college-campus combinations",
         total_unique,
     )
 
@@ -435,7 +488,7 @@ if "matching_results" in st.session_state:
     )
 
     result_mapping = {
-        row["normalized_name"]: {
+        row["match_key"]: {
             "college_id": row["college_id"],
             "confidence": row["confidence"],
             "decision": row["decision"],
@@ -466,6 +519,12 @@ if "matching_results" in st.session_state:
                 ]
             ),
             results=result_mapping,
+            input_city_column=st.session_state.get(
+                "city_column"
+            ),
+            input_state_column=st.session_state.get(
+                "state_column"
+            ),
             confidence_column_name=(
                 "Confidence Score"
             ),
@@ -581,6 +640,8 @@ if "matching_results" in st.session_state:
 
     audit_columns = [
         "input_name",
+        "input_city",
+        "input_state",
         "decision",
         "college_id",
         "matched_name",
@@ -594,6 +655,8 @@ if "matching_results" in st.session_state:
 
     audit_dataframe.columns = [
         "Input College Name",
+        "Input City",
+        "Input State",
         "Decision",
         "College ID",
         "Matched College Name",
@@ -631,6 +694,8 @@ if "matching_results" in st.session_state:
             "target_sheet_name",
             "college_name_column",
             "college_id_column",
+            "city_column",
+            "state_column",
             "master_count",
             "target_count",
         ]
