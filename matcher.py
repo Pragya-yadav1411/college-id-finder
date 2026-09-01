@@ -79,7 +79,7 @@ ProgressCallback = Callable[
 ]
 
 
-MATCHER_VERSION = "2026.08.31.6-CITY-RECOVERY"
+MATCHER_VERSION = "2026.08.31.7-COURSE-AWARE"
 
 
 MOJIBAKE_REPLACEMENTS = {
@@ -280,7 +280,47 @@ def normalize(value: object) -> str:
         text,
     )
 
+    # Common upload typos must not break otherwise exact institution
+    # identities. Apply these after punctuation cleanup so replacements
+    # are token-safe for both master and input text.
+    typo_tokens = {
+        "insitute": "institute",
+        "institue": "institute",
+        "univeristy": "university",
+        "unversity": "university",
+        "enginering": "engineering",
+        "architechture": "architecture",
+    }
+    text = " ".join(
+        typo_tokens.get(token, token)
+        for token in text.split()
+    )
+
     return " ".join(text.split())
+
+
+def academic_intents(value: object) -> set[str]:
+    """Map unlike course and department labels to shared concepts."""
+
+    clean = normalize(value)
+    padded = f" {clean} "
+    intents: set[str] = set()
+    phrase_map = {
+        "architecture": (" architecture ", " b arch ", " barch "),
+        "planning": (" planning ", " b plan ", " bplan "),
+        "engineering": (
+            " engineering ", " b tech ", " btech ", " m tech ", " mtech "
+        ),
+        "management": (" management ", " mba ", " pgdm "),
+        "pharmacy": (
+            " pharmacy ", " b pharm ", " bpharm ", " m pharm ", " mpharm "
+        ),
+        "law": (" law ", " llb ", " llm "),
+    }
+    for intent, phrases in phrase_map.items():
+        if any(phrase in padded for phrase in phrases):
+            intents.add(intent)
+    return intents
 
 
 def structural_identity(value: object) -> str:
@@ -1743,6 +1783,29 @@ class CollegeMatcher:
                 )
             }
 
+            # A campus may have both a general institution record and a
+            # course-specific record. Within the already-confirmed national
+            # system + city pool, prefer the one expressing the input's
+            # academic unit. Example: Department of Architecture, NIT
+            # Hamirpur -> the NIT Hamirpur B.Arch database record.
+            input_intents = academic_intents(clean_input)
+            if input_intents and len(system_ids) > 1:
+                intent_ids = {
+                    college_id
+                    for college_id in system_ids
+                    if input_intents
+                    & academic_intents(
+                        " ".join(
+                            [
+                                self.college_by_id[college_id]["clean_name"],
+                                self.college_by_id[college_id]["short_form"],
+                            ]
+                        )
+                    )
+                }
+                if len(intent_ids) == 1:
+                    system_ids = intent_ids
+
             if len(system_ids) == 1:
                 college_id = next(iter(system_ids))
                 record = self.college_by_id[college_id]
@@ -2135,4 +2198,4 @@ class CollegeMatcher:
 
         return pd.DataFrame(
             output_rows
-        )     
+        )
