@@ -79,7 +79,7 @@ ProgressCallback = Callable[
 ]
 
 
-MATCHER_VERSION = "2026.08.31.7-COURSE-AWARE"
+MATCHER_VERSION = "2026.09.01.1-NATIONAL-INSTITUTES"
 
 
 MOJIBAKE_REPLACEMENTS = {
@@ -322,6 +322,81 @@ def academic_intents(value: object) -> set[str]:
             intents.add(intent)
     return intents
 
+
+
+def national_system_families(
+    college_name: object,
+    short_form: object = "",
+) -> set[str]:
+    """Identify genuine IIT, NIT, IIIT, IIM, AIIMS and BITS records."""
+
+    clean_name = normalize(college_name)
+    clean_short = normalize(short_form)
+    combined = f"{clean_name} {clean_short}".strip()
+
+    short_first = (
+        clean_short.split()[0]
+        if clean_short
+        else ""
+    )
+
+    families: set[str] = set()
+
+    if (
+        "indian institute of information technology"
+        in combined
+        or short_first == "iiit"
+        or clean_name.startswith("iiit ")
+    ):
+        families.add("iiit")
+
+    if (
+        (
+            "indian institute of technology"
+            in combined
+            or short_first == "iit"
+            or clean_name.startswith("iit ")
+        )
+        and (
+            "indian institute of information technology"
+            not in combined
+        )
+    ):
+        families.add("iit")
+
+    if (
+        "national institute of technology"
+        in combined
+        or short_first == "nit"
+        or clean_name.startswith("nit ")
+    ):
+        families.add("nit")
+
+    if (
+        "indian institute of management"
+        in combined
+        or short_first == "iim"
+        or clean_name.startswith("iim ")
+    ):
+        families.add("iim")
+
+    if (
+        "all india institute of medical sciences"
+        in combined
+        or short_first == "aiims"
+        or clean_name.startswith("aiims ")
+    ):
+        families.add("aiims")
+
+    if (
+        "birla institute of technology and science"
+        in combined
+        or short_first == "bits"
+        or clean_name.startswith("bits ")
+    ):
+        families.add("bits")
+
+    return families
 
 def structural_identity(value: object) -> str:
     """Extract the institution and ignore descriptive sub-unit suffixes."""
@@ -1759,9 +1834,25 @@ class CollegeMatcher:
                 system_acronyms.add(acronym)
         detected_system_city, _ = self.detect_city(contextual_input)
         if system_acronyms and detected_system_city:
+            system_subunit_markers = {
+                "department",
+                "faculty",
+                "school",
+                "centre",
+                "center",
+                "management",
+                "design",
+                "entrepreneurship",
+                "online",
+                "distance",
+                "executive",
+                "digital",
+                "wilp",
+            }
+
             input_system_subunits = (
                 set(clean_input.split())
-                & {"department", "faculty", "school"}
+                & system_subunit_markers
             )
             system_ids = {
                 college_id
@@ -1770,15 +1861,23 @@ class CollegeMatcher:
                     set(),
                 )
                 if system_acronyms
-                & (
-                    set(self.college_by_id[college_id]["clean_name"].split())
-                    | set(self.college_by_id[college_id]["short_form"].split())
+                & national_system_families(
+                    self.college_by_id[
+                        college_id
+                    ]["clean_name"],
+                    self.college_by_id[
+                        college_id
+                    ]["short_form"],
                 )
                 and (
                     input_system_subunits
                     or not (
-                        set(self.college_by_id[college_id]["clean_name"].split())
-                        & {"department", "faculty", "school", "digital", "wilp"}
+                        set(
+                            self.college_by_id[
+                                college_id
+                            ]["clean_name"].split()
+                        )
+                        & system_subunit_markers
                     )
                 )
             }
